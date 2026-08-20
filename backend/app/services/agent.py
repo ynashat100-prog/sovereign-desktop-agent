@@ -6,6 +6,8 @@ import re
 from time import perf_counter
 from uuid import uuid4
 
+from starlette.concurrency import run_in_threadpool
+
 from app.core.config import Settings
 from app.core.state_machine import AgentRun
 from app.models.schemas import (
@@ -26,9 +28,8 @@ When a listed tool is useful, respond with exactly one line in this format:
 TOOL: tool.name | {"argument":"value"} | short rationale
 Available tools: system.active_context, application.list, application.open, filesystem.read_text,
 filesystem.search, filesystem.write_text, filesystem.create_file, filesystem.create_folder,
-filesystem.open, filesystem.delete, clipboard.read, clipboard.write, system.get_clipboard,
-system.set_clipboard, system.screenshot, system.volume, system.brightness,
-system.open_settings, web.search, terminal.run, system.run_command.
+filesystem.open, filesystem.delete, clipboard.read, clipboard.write, system.screenshot,
+system.volume, system.brightness, system.open_settings, web.search, terminal.run.
 Never request or invent a tool outside this list. The permission engine—not you—decides whether
 an action runs. For ordinary questions, respond normally and concisely."""
 
@@ -78,10 +79,10 @@ class AgentService:
 
             if route.mode == "fast":
                 direct_tool = self._deterministic_tool(request.text)
-                if direct_tool and self.permissions.requires_approval(direct_tool):
+                if direct_tool and self.permissions.requires_approval(direct_tool, request.session_id):
                     run.transition(RunState.PLANNING)
                     run.transition(RunState.AWAITING_PERMISSION)
-                    self.permissions.request(run_id, direct_tool)
+                    self.permissions.request(run_id, request.session_id, direct_tool)
                     await self._trace(
                         request,
                         run_id,
@@ -131,9 +132,9 @@ class AgentService:
             run.ensure_active()
             tool_call = self._parse_tool(generation.text)
             if tool_call:
-                if self.permissions.requires_approval(tool_call):
+                if self.permissions.requires_approval(tool_call, request.session_id):
                     run.transition(RunState.AWAITING_PERMISSION)
-                    self.permissions.request(run_id, tool_call)
+                    self.permissions.request(run_id, request.session_id, tool_call)
                     await self._trace(
                         request,
                         run_id,
@@ -170,27 +171,37 @@ class AgentService:
                 run.state = RunState.FAILED
             await self._trace(request, run_id, "error", f"Runtime error: {exc}")
             return self._response(run, request, run_id, f"Feature unavailable: {exc}", started)
+        finally:
+            if run.state != RunState.AWAITING_PERMISSION:
+                self.runs.pop(run_id, None)
 
     async def approve(self, run_id: str, decision: str, request: MessageRequest) -> AgentResponse:
         started = perf_counter()
         run = self.runs.get(run_id)
         if not run:
             raise KeyError("Unknown run")
-        tool = self.permissions.decide(run_id, decision)
-        run.ensure_active()
-        run.transition(RunState.EXECUTING)
-        result = await self._execute_tool(tool, request, run_id, run)
-        run.transition(RunState.COMPLETED)
-        return self._response(run, request, run_id, result, started, [tool])
+        try:
+            tool = self.permissions.decide(run_id, request.session_id, decision)
+            run.ensure_active()
+            run.transition(RunState.EXECUTING)
+            result = await self._execute_tool(tool, request, run_id, run)
+            run.transition(RunState.COMPLETED)
+            return self._response(run, request, run_id, result, started, [tool])
+        except PermissionError:
+            run.state = RunState.FAILED
+            raise
+        finally:
+            if run.state != RunState.AWAITING_PERMISSION:
+                self.runs.pop(run_id, None)
 
     def stop(self, run_id: str | None = None) -> int:
-        targets = [self.runs[run_id]] if run_id and run_id in self.runs else self.runs.values()
+        targets = [self.runs[run_id]] if run_id and run_id in self.runs else ([] if run_id else list(self.runs.values()))
         count = 0
         for run in targets:
             if run.state not in {RunState.COMPLETED, RunState.FAILED, RunState.STOPPED}:
                 run.stop()
                 count += 1
-        self.permissions.clear()
+        self.permissions.clear(run_id)
         return count
 
     async def _fast_task(
@@ -339,7 +350,7 @@ class AgentService:
             )
 
         if any(term in lowered for term in ("اقرأ الحافظة", "محتوى الحافظة", "read clipboard")):
-            return self._tool_call("system.get_clipboard", {}, "Requested clipboard contents")
+            return self._tool_call("clipboard.read", {}, "Requested clipboard contents")
         return None
 
     async def _execute_tool(
@@ -352,13 +363,13 @@ class AgentService:
         await self._trace(
             request, run_id, "tool", f"Tool → {tool.name}", permission=tool.permission.value
         )
-        result = registered.handler(tool.arguments)
+        result = await run_in_threadpool(registered.handler, tool.arguments)
         await self._trace(request, run_id, "result", "Tool completed", tool=tool.name)
         return f"{tool.name} completed: {result}"
 
     def _parse_tool(self, text: str) -> ToolCall | None:
         match = re.match(
-            r"^TOOL:\\s*([\\w.]+)\\s*\\|\\s*(\\{.*\\})\\s*\\|\\s*(.+)$", text.strip(), re.DOTALL
+            r"^TOOL:\s*([\w.]+)\s*\|\s*(\{.*\})\s*\|\s*(.+)$", text.strip(), re.DOTALL
         )
         if not match:
             return None
@@ -369,6 +380,8 @@ class AgentService:
             arguments = json.loads(raw_args)
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid tool JSON: {exc.msg}") from exc
+        if name not in TOOLS:
+            raise ValueError(f"Tool is not allow-listed: {name}")
         permission = self.permissions.permission_for(name, arguments)
         return ToolCall(name=name, arguments=arguments, permission=permission, rationale=rationale)
 

@@ -26,9 +26,9 @@ def test_router_identifies_simple_request():
     assert not SmartRouter().is_simple("حلل مشروع برمجي كبير")
 
 
-def test_permission_manager_owns_terminal_risk_classification():
+def test_terminal_tool_is_dangerous_even_for_read_only_commands():
     manager = PermissionManager()
-    assert manager.permission_for("terminal.run", {"command": "dir"}) == PermissionLevel.CONFIRM
+    assert manager.permission_for("terminal.run", {"command": "dir"}) == PermissionLevel.DANGEROUS
     assert manager.permission_for("terminal.run", {"command": "del important.txt"}) == PermissionLevel.DANGEROUS
 
 
@@ -41,7 +41,7 @@ def test_dangerous_tool_is_disabled_by_default():
         rationale="requested",
     )
     try:
-        manager.request("run-1", call)
+        manager.request("run-1", "test-session", call)
     except PermissionError as exc:
         assert "disabled" in str(exc)
     else:
@@ -174,3 +174,101 @@ def test_system_credential_store_wraps_unexpected_backend_errors():
         assert str(exc) == "Secure credential storage is unavailable"
     else:
         raise AssertionError("Credential storage errors must be normalized")
+
+
+def test_model_tool_protocol_is_parsed_and_unknown_tools_are_rejected():
+    from app.services.agent import AgentService
+
+    service = object.__new__(AgentService)
+    service.permissions = PermissionManager()
+    tool = service._parse_tool('TOOL: clipboard.write | {"text":"hello"} | copy requested text')
+    assert tool is not None
+    assert tool.name == "clipboard.write"
+    assert tool.arguments == {"text": "hello"}
+
+    try:
+        service._parse_tool("TOOL: system.unlisted | {} | bypass policy")
+    except ValueError as exc:
+        assert "allow-listed" in str(exc)
+    else:
+        raise AssertionError("Unknown tools must be rejected before permission handling")
+
+
+def test_allow_always_is_scoped_to_exact_tool_arguments():
+    manager = PermissionManager()
+    original = ToolCall(
+        name="clipboard.write",
+        arguments={"text": "approved"},
+        permission=PermissionLevel.CONFIRM,
+        rationale="requested",
+    )
+    manager.request("run-1", "session-1", original)
+    manager.decide("run-1", "session-1", "allow_always")
+    assert not manager.requires_approval(original, "session-1")
+    assert manager.requires_approval(original, "session-2")
+
+    different = original.model_copy(update={"arguments": {"text": "different"}})
+    assert manager.requires_approval(different, "session-1")
+
+
+def test_content_tools_reject_paths_outside_user_content_folders(monkeypatch, tmp_path):
+    import app.tools.catalog as catalog
+
+    for folder in ("Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos"):
+        (tmp_path / folder).mkdir()
+    secret = tmp_path / ".ssh" / "id_rsa"
+    secret.parent.mkdir()
+    secret.write_text("secret", encoding="utf-8")
+    monkeypatch.setattr(catalog.Path, "home", classmethod(lambda cls: tmp_path))
+
+    try:
+        catalog.TOOLS["filesystem.read_text"].handler({"path": str(secret)})
+    except PermissionError as exc:
+        assert "limited" in str(exc)
+    else:
+        raise AssertionError("Reading secrets outside content folders must be refused")
+
+
+def test_content_search_stops_at_the_result_limit(monkeypatch, tmp_path):
+    import app.tools.catalog as catalog
+
+    documents = tmp_path / "Documents"
+    documents.mkdir()
+    for index in range(60):
+        (documents / f"file-{index}.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(catalog.Path, "home", classmethod(lambda cls: tmp_path))
+
+    result = catalog.TOOLS["filesystem.search"].handler({"root": str(documents), "pattern": "*.txt"})
+    assert len(result["matches"]) == 50
+    assert result["truncated"] is True
+
+
+def test_application_open_rejects_command_interpreters_and_arguments():
+    import app.tools.catalog as catalog
+
+    for payload in ({"executable": "powershell.exe"}, {"executable": "notepad.exe", "args": ["file.txt"]}):
+        try:
+            catalog.TOOLS["application.open"].handler(payload)
+        except (PermissionError, ValueError):
+            continue
+        raise AssertionError("Application open must not accept command interpreter or free arguments")
+
+
+def test_router_does_not_match_substrings_inside_regular_words():
+    router = SmartRouter()
+    assert not router.is_simple("I sometimes commute after work")
+    assert not router.is_simple("This is an open-ended discussion")
+
+
+def test_stop_with_unknown_run_id_does_not_stop_other_runs():
+    from app.core.state_machine import AgentRun
+    from app.services.agent import AgentService
+
+    service = object.__new__(AgentService)
+    active = AgentRun("active-run")
+    active.transition(RunState.ROUTING)
+    service.runs = {"active-run": active}
+    service.permissions = PermissionManager()
+
+    assert service.stop("unknown-run") == 0
+    assert active.state == RunState.ROUTING

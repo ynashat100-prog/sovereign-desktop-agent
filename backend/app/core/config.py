@@ -1,7 +1,9 @@
 """Runtime configuration. Secrets are read only from environment variables or local settings."""
 
 from pathlib import Path
+from secrets import token_urlsafe
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,8 +12,9 @@ class Settings(BaseSettings):
 
     agent_host: str = "127.0.0.1"
     agent_port: int = 8765
-    agent_data_dir: Path = Path("agent-data")
+    agent_data_dir: Path = Path.home() / ".personal-assistant"
     agent_demo_mode: bool = False
+    agent_runtime_token: str = Field(default_factory=lambda: token_urlsafe(32))
 
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen2.5-coder:7b"

@@ -37,13 +37,10 @@ class MemoryService:
                 "text": text[:4000],
                 "created_at": datetime.now(UTC).isoformat(),
             }
-            table = (
-                db.open_table("episodic")
-                if "episodic" in db.table_names()
-                else db.create_table("episodic", [row])
-            )
             if "episodic" in db.table_names():
-                table.add([row])
+                db.open_table("episodic").add([row])
+            else:
+                db.create_table("episodic", [row])
             return True
         except Exception:
             return False

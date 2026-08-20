@@ -2,49 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from app.providers.base import ModelProvider
 
-_SIMPLE_PATTERNS = (
-    "what time",
-    "time is",
-    "open ",
-    "read file",
-    "find file",
-    "search file",
-    "create folder",
-    "ما الوقت",
-    "افتح ",
-    "اقرأ ملف",
-    "ابحث عن ملف",
-    "أنشئ مجلد",
-    "احذف ملف",
-    "احذف مجلد",
-    "لقطة شاشة",
-    "صورة للشاشة",
-    "التطبيقات المثبتة",
-    "البرامج المثبتة",
-    "السطوع",
-    "ارفع الصوت",
-    "اخفض الصوت",
-    "اكتم الصوت",
-    "إعدادات",
-    "اقرأ الحافظة",
-    "ابحث على الإنترنت",
-    "open app",
-    "delete file",
-    "delete folder",
-    "screenshot",
-    "installed apps",
-    "brightness",
-    "volume up",
-    "volume down",
-    "mute",
-    "settings",
-    "read clipboard",
-    "search web",
-    "web search",
+_SIMPLE_COMMANDS = (
+    r"\b(?:what time|time is|read file|find file|search file|create folder)\b",
+    r"\bopen\s+(?:app|file|folder)\b",
+    r"\b(?:delete file|delete folder|installed apps|active processes|screenshot|brightness|volume up|volume down|read clipboard)\b",
+    r"\b(?:sound|display|bluetooth|network|privacy)\s+settings\b",
+    r"\b(?:search the web for|search web for|web search)\b",
+    r"(?:ما الوقت|اقرأ ملف|ابحث عن ملف|أنشئ مجلد|انشئ مجلد|افتح\s+(?:برنامج|الملف|المجلد)|احذف\s+(?:ملف|مجلد)|التطبيقات المثبتة|البرامج المثبتة|البرامج النشطة|لقطة شاشة|صورة للشاشة|السطوع|ارفع الصوت|اخفض الصوت|اكتم الصوت|اقرأ الحافظة|ابحث على الإنترنت)",
 )
 _COMPLEX_SIGNALS = ("analyze", "build", "fix", "project", "multiple", "حلل", "ابن", "أصلح", "مشروع")
 
@@ -58,9 +27,10 @@ class Route:
 
 class SmartRouter:
     def is_simple(self, text: str) -> bool:
-        normalized = text.lower().strip()
-        return any(pattern in normalized for pattern in _SIMPLE_PATTERNS) and not any(
-            signal in normalized for signal in _COMPLEX_SIGNALS
+        normalized = text.casefold().strip()
+        return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in _SIMPLE_COMMANDS) and not any(
+            re.search(rf"(?<!\w){re.escape(signal)}(?!\w)", normalized, re.IGNORECASE)
+            for signal in _COMPLEX_SIGNALS
         )
 
     async def route(

@@ -33,8 +33,30 @@ class RegisteredTool:
     handler: Callable[[dict[str, Any]], dict[str, Any]]
 
 
+_CONTENT_FOLDERS = ("Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos")
+
+
 def _path(value: str) -> Path:
-    return Path(value).expanduser().resolve()
+    raw = Path(value).expanduser()
+    if raw.is_symlink():
+        raise ValueError("Symbolic links are not allowed for desktop file tools")
+    return raw.resolve()
+
+
+def _allowed_roots() -> tuple[Path, ...]:
+    home = Path.home().resolve()
+    return tuple((home / folder).resolve() for folder in _CONTENT_FOLDERS if (home / folder).exists())
+
+
+def _require_content_path(path: Path, *, allow_root: bool = False) -> None:
+    for root in _allowed_roots():
+        if path == root:
+            if allow_root:
+                return
+            raise ValueError("Operating on a protected content folder itself is not allowed")
+        if path.is_relative_to(root):
+            return
+    raise PermissionError("File tools are limited to Desktop, Documents, Downloads, Pictures, Music, and Videos")
 
 
 def _require_windows(feature: str) -> None:
@@ -44,8 +66,13 @@ def _require_windows(feature: str) -> None:
 
 def _refuse_system_root(path: Path) -> None:
     home = Path.home().resolve()
-    if path == path.parent or path == home:
-        raise ValueError("Refusing to operate on a system root or the entire home folder")
+    protected_windows_paths = {
+        Path(os.environ.get("WINDIR", r"C:\\Windows")).resolve(),
+        Path(os.environ.get("ProgramFiles", r"C:\\Program Files")).resolve(),
+        Path(os.environ.get("ProgramData", r"C:\\ProgramData")).resolve(),
+    }
+    if path == path.parent or path == home or any(path == protected for protected in protected_windows_paths):
+        raise ValueError("Refusing to operate on a system root or protected system folder")
 
 
 def _active_process(_: dict[str, Any]) -> dict[str, Any]:
@@ -55,6 +82,7 @@ def _active_process(_: dict[str, Any]) -> dict[str, Any]:
 
 def _read_text_file(arguments: dict[str, Any]) -> dict[str, Any]:
     path = _path(str(arguments["path"]))
+    _require_content_path(path)
     if not path.is_file():
         raise FileNotFoundError(f"File not found: {path}")
     if path.stat().st_size > 1_000_000:
@@ -63,21 +91,30 @@ def _read_text_file(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _search_files(arguments: dict[str, Any]) -> dict[str, Any]:
-    root = _path(str(arguments.get("root", Path.home())))
+    default_root = next(iter(_allowed_roots()), Path.home() / "Documents")
+    root = _path(str(arguments.get("root", default_root)))
+    _require_content_path(root, allow_root=True)
     pattern = str(arguments.get("pattern", "*"))
     if not root.is_dir():
         raise NotADirectoryError(f"Directory not found: {root}")
-    matches = [str(item) for item in root.rglob(pattern) if item.is_file() or item.is_dir()][:50]
-    return {
-        "root": str(root),
-        "pattern": pattern,
-        "matches": matches,
-        "truncated": len(matches) == 50,
-    }
+    matches: list[str] = []
+    truncated = False
+    try:
+        for item in root.rglob(pattern):
+            if item.is_symlink():
+                continue
+            matches.append(str(item))
+            if len(matches) == 50:
+                truncated = True
+                break
+    except OSError as exc:
+        raise RuntimeError(f"Unable to search the selected folder: {exc}") from exc
+    return {"root": str(root), "pattern": pattern, "matches": matches, "truncated": truncated}
 
 
 def _write_text_file(arguments: dict[str, Any]) -> dict[str, Any]:
     path = _path(str(arguments["path"]))
+    _require_content_path(path)
     if path.exists() and not bool(arguments.get("overwrite", False)):
         raise FileExistsError(
             "Refusing to overwrite an existing file without explicit overwrite=true"
@@ -89,12 +126,14 @@ def _write_text_file(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _create_folder(arguments: dict[str, Any]) -> dict[str, Any]:
     path = _path(str(arguments["path"]))
+    _require_content_path(path)
     path.mkdir(parents=True, exist_ok=True)
     return {"path": str(path), "created": True}
 
 
 def _delete_path(arguments: dict[str, Any]) -> dict[str, Any]:
     path = _path(str(arguments["path"]))
+    _require_content_path(path)
     _refuse_system_root(path)
     if not path.exists() and not path.is_symlink():
         raise FileNotFoundError(f"Path not found: {path}")
@@ -112,6 +151,7 @@ def _delete_path(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _open_path(arguments: dict[str, Any]) -> dict[str, Any]:
     path = _path(str(arguments["path"]))
+    _require_content_path(path, allow_root=True)
     if not path.exists():
         raise FileNotFoundError(f"Path not found: {path}")
     system = platform.system()
@@ -125,10 +165,15 @@ def _open_path(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _open_application(arguments: dict[str, Any]) -> dict[str, Any]:
-    executable = str(arguments["executable"])
-    if Path(executable).name != executable and not Path(executable).is_absolute():
-        raise ValueError("Application must be a simple executable name or absolute path")
-    subprocess.Popen([executable, *[str(x) for x in arguments.get("args", [])]])  # noqa: S603
+    executable = str(arguments["executable"]).strip()
+    blocked = {"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe", "wscript.exe", "cscript.exe", "mshta.exe"}
+    if not executable or Path(executable).name != executable:
+        raise ValueError("Application must be a simple executable name without a path")
+    if executable.casefold() in blocked:
+        raise PermissionError("Command interpreters must use the disabled dangerous terminal tool")
+    if arguments.get("args"):
+        raise ValueError("Application arguments are not supported by this tool")
+    subprocess.Popen([executable])  # noqa: S603
     return {"started": executable}
 
 
@@ -192,6 +237,7 @@ def _screenshot(arguments: dict[str, Any]) -> dict[str, Any]:
     requested = arguments.get("path")
     if requested:
         path = _path(str(requested))
+        _require_content_path(path)
         if path.suffix.lower() != ".png":
             path = path.with_suffix(".png")
     else:
@@ -315,6 +361,8 @@ def _web_search(arguments: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(f"Web search could not be completed: {exc}") from exc
     parser = _DuckDuckGoResultsParser()
     parser.feed(content)
+    if not parser.results:
+        raise RuntimeError("Web search returned no parseable results; try a more specific query")
     return {"query": query, "results": parser.results, "provider": "DuckDuckGo"}
 
 
@@ -353,10 +401,10 @@ TOOLS: dict[str, RegisteredTool] = {
         _list_applications,
     ),
     "filesystem.search": RegisteredTool(
-        "filesystem.search", PermissionLevel.SAFE, "Search a selected folder", _search_files
+        "filesystem.search", PermissionLevel.CONFIRM, "Search a selected content folder", _search_files
     ),
     "filesystem.read_text": RegisteredTool(
-        "filesystem.read_text", PermissionLevel.SAFE, "Read a text file up to 1 MB", _read_text_file
+        "filesystem.read_text", PermissionLevel.CONFIRM, "Read a text file from a selected content folder", _read_text_file
     ),
     "filesystem.write_text": RegisteredTool(
         "filesystem.write_text", PermissionLevel.CONFIRM, "Write a text file", _write_text_file
@@ -382,12 +430,6 @@ TOOLS: dict[str, RegisteredTool] = {
     "clipboard.write": RegisteredTool(
         "clipboard.write", PermissionLevel.CONFIRM, "Write to the clipboard", _clipboard_write
     ),
-    "system.get_clipboard": RegisteredTool(
-        "system.get_clipboard", PermissionLevel.CONFIRM, "Read the clipboard", _clipboard_read
-    ),
-    "system.set_clipboard": RegisteredTool(
-        "system.set_clipboard", PermissionLevel.CONFIRM, "Write to the clipboard", _clipboard_write
-    ),
     "system.screenshot": RegisteredTool(
         "system.screenshot", PermissionLevel.CONFIRM, "Capture and save a local PNG screenshot", _screenshot
     ),
@@ -405,8 +447,5 @@ TOOLS: dict[str, RegisteredTool] = {
     ),
     "terminal.run": RegisteredTool(
         "terminal.run", PermissionLevel.DANGEROUS, "Run a bounded command without a shell", _terminal_command
-    ),
-    "system.run_command": RegisteredTool(
-        "system.run_command", PermissionLevel.DANGEROUS, "Run a bounded command without a shell", _terminal_command
     ),
 }

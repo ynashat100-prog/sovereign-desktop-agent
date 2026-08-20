@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
@@ -87,6 +87,7 @@ class ToolCall(BaseModel):
 
 class PermissionDecision(BaseModel):
     run_id: str
+    session_id: str = Field(min_length=8, max_length=120)
     decision: Literal["allow_once", "allow_always", "deny"]
 
 
@@ -106,7 +107,7 @@ class AgentResponse(BaseModel):
 class TraceEvent(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     run_id: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     category: Literal[
         "request", "router", "provider", "tool", "permission", "state", "result", "error"
     ]

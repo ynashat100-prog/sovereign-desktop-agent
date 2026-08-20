@@ -13,8 +13,10 @@ class TraceHub:
     def __init__(self) -> None:
         self._connections: defaultdict[str, set[WebSocket]] = defaultdict(set)
 
-    async def connect(self, session_id: str, websocket: WebSocket) -> None:
-        await websocket.accept()
+    async def connect(
+        self, session_id: str, websocket: WebSocket, subprotocol: str | None = None
+    ) -> None:
+        await websocket.accept(subprotocol=subprotocol)
         self._connections[session_id].add(websocket)
 
     def disconnect(self, session_id: str, websocket: WebSocket) -> None:

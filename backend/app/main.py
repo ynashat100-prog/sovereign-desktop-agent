@@ -6,11 +6,12 @@ import asyncio
 import json
 import platform
 from contextlib import asynccontextmanager
+from hmac import compare_digest
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.config import settings
 from app.models.schemas import (
@@ -58,19 +59,32 @@ async def lifespan(_: FastAPI):
     agent.stop()
 
 
-app = FastAPI(title="Personal Assistant Runtime", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Personal Assistant Runtime", version="0.2.1", lifespan=lifespan)
+_ALLOWED_ORIGINS = {
+    "http://localhost:1420",
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+}
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:1420",
-        "tauri://localhost",
-        "http://tauri.localhost",
-        "https://tauri.localhost",
-    ],
+    allow_origins=sorted(_ALLOWED_ORIGINS),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def require_runtime_token(request: Request, call_next):
+    """Reject all control requests not made by the Tauri window that launched this runtime."""
+    if request.url.path == "/health" or request.method == "OPTIONS":
+        return await call_next(request)
+    supplied = request.headers.get("X-Agent-Token", "")
+    if not compare_digest(supplied, settings.agent_runtime_token):
+        return JSONResponse(status_code=401, content={"detail": "Runtime authentication failed"})
+    return await call_next(request)
 
 
 def _custom_statuses() -> list[ProviderStatus]:
@@ -86,6 +100,7 @@ def _custom_statuses() -> list[ProviderStatus]:
             models=[item["model"]],
         )
         for item in provider_registry.list()
+        if item["id"] not in agent.providers
     ]
 
 
@@ -111,7 +126,16 @@ async def health() -> dict[str, str]:
 @app.get("/v1/status", response_model=RuntimeStatus)
 async def runtime_status() -> RuntimeStatus:
     statuses = await asyncio.gather(*(provider.status() for provider in agent.providers.values()))
-    ollama = next(item for item in statuses if item.id == "ollama")
+    ollama = next(
+        (item for item in statuses if item.id == "ollama"),
+        ProviderStatus(
+            id="ollama",
+            name="Ollama",
+            kind="local",
+            available=False,
+            detail="Ollama provider is not registered",
+        ),
+    )
     clouds = [item for item in statuses if item.id != "ollama"] + _custom_statuses()
     return RuntimeStatus(
         runtime_available=True, demo_mode=settings.agent_demo_mode, ollama=ollama, cloud=clouds
@@ -287,7 +311,7 @@ async def decide_permission(decision: PermissionDecision):
         return await agent.approve(
             decision.run_id,
             decision.decision,
-            MessageRequest(text="Permission decision", session_id="permissions"),
+            MessageRequest(text="Permission decision", session_id=decision.session_id),
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -302,7 +326,14 @@ async def stop_agent(run_id: str | None = None):
 
 @app.websocket("/v1/ws/{session_id}")
 async def trace_socket(websocket: WebSocket, session_id: str):
-    await trace_hub.connect(session_id, websocket)
+    origin = websocket.headers.get("origin")
+    protocols = {
+        value.strip() for value in websocket.headers.get("sec-websocket-protocol", "").split(",")
+    }
+    if origin not in _ALLOWED_ORIGINS or settings.agent_runtime_token not in protocols:
+        await websocket.close(code=1008)
+        return
+    await trace_hub.connect(session_id, websocket, subprotocol="agent-runtime")
     try:
         await trace_hub.wait_for_disconnect(websocket)
     finally:
