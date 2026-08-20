@@ -1,0 +1,50 @@
+name: Windows Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Install backend build dependencies
+        run: python -m pip install -e ".\backend[dev]"
+      - name: Test backend
+        working-directory: backend
+        run: |
+          ruff check app tests
+          pytest -q
+      - name: Build bundled runtime sidecar
+        run: python .\scripts\build_backend.py
+      - name: Install frontend
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Build NSIS installer
+        working-directory: frontend
+        run: pnpm tauri:build -- --target x86_64-pc-windows-msvc
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: sovereign-desktop-agent-windows-x64
+          path: frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: error
