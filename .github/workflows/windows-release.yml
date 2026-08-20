@@ -1,0 +1,294 @@
+name: Windows Release
+
+
+
+on:
+
+  workflow_dispatch:
+  
+  push:
+  
+    tags: ["v*"]
+    
+
+
+permissions:
+
+  contents: write
+  
+
+
+jobs:
+
+  package:
+  
+    name: Build Windows x64 NSIS installer
+    
+    runs-on: windows-latest
+    
+    steps:
+    
+      - name: Check out source
+      
+        uses: actions/checkout@v4
+        
+
+
+      - name: Set up Python
+      
+        uses: actions/setup-python@v5
+        
+        with:
+        
+          python-version: "3.12"
+          
+
+
+      - name: Set up pnpm
+      
+        uses: pnpm/action-setup@v4
+        
+        with:
+        
+          version: 11
+          
+
+
+      - name: Set up Node.js
+      
+        uses: actions/setup-node@v4
+        
+        with:
+        
+          node-version: 22
+          
+          cache: pnpm
+          
+          cache-dependency-path: frontend/pnpm-lock.yaml
+          
+
+
+      - name: Set up Rust for Windows x64
+      
+        uses: dtolnay/rust-toolchain@stable
+        
+        with:
+        
+          targets: x86_64-pc-windows-msvc
+          
+
+
+      - name: Install backend dependencies
+      
+        run: python -m pip install -e ".\backend[dev]"
+        
+
+
+      - name: Lint and test backend
+      
+        working-directory: backend
+        
+        run: |
+        
+          ruff check app tests
+          
+          pytest -q
+          
+
+
+      - name: Build Python sidecar
+      
+        run: python .\scripts\build_backend.py
+        
+
+
+      - name: Verify packaged sidecar starts
+      
+        shell: pwsh
+        
+        run: |
+        
+          $sidecar = ".\frontend\src-tauri\binaries\agent-runtime-x86_64-pc-windows-msvc.exe"
+          
+          if (-not (Test-Path $sidecar)) { throw "Expected Windows sidecar was not produced: $sidecar" }
+          
+          $process = Start-Process -FilePath $sidecar -PassThru -WindowStyle Hidden
+          
+          try {
+          
+            $healthy = $false
+            
+            1..15 | ForEach-Object {
+            
+              Start-Sleep -Seconds 1
+              
+              try {
+              
+                $response = Invoke-RestMethod -Uri "http://127.0.0.1:8765/health" -TimeoutSec 2
+                
+                if ($response.status -eq "ok") { $healthy = $true; return }
+                
+              } catch { }
+              
+            }
+            
+            if (-not $healthy) { throw "Packaged sidecar did not pass /health within 15 seconds" }
+            
+          } finally {
+          
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+            
+          }
+          
+
+
+      - name: Install frontend dependencies
+      
+        working-directory: frontend
+        
+        run: pnpm install --frozen-lockfile
+        
+
+
+      - name: Lint frontend
+      
+        working-directory: frontend
+        
+        run: pnpm lint
+        
+
+
+      - name: Build Windows x64 NSIS installer
+      
+        working-directory: frontend
+        
+        run: pnpm tauri:build -- --target x86_64-pc-windows-msvc
+        
+
+
+      - name: Verify installer output
+      
+        shell: pwsh
+        
+        run: |
+        
+          $installer = Get-ChildItem "frontend\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\*.exe" | Select-Object -First 1
+          
+          if (-not $installer) { throw "NSIS installer was not produced" }
+          
+          "INSTALLER_NAME=$($installer.Name)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          
+          "INSTALLER_PATH=$($installer.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          
+
+
+      - name: Upload Windows installer artifact
+      
+        uses: actions/upload-artifact@v4
+        
+        with:
+        
+          name: sovereign-desktop-agent-windows-x64
+          
+          path: frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          
+          if-no-files-found: error
+          
+
+
+      - name: Publish GitHub Release
+      
+        if: startsWith(github.ref, 'refs/tags/v')
+        
+        uses: softprops/action-gh-release@v2
+        
+        with:
+        
+          generate_release_notes: true
+          
+          files: frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
