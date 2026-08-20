@@ -5,10 +5,6 @@ description = "Local-first desktop AI agent"
 authors = ["Sovereign Desktop Agent contributors"]
 edition = "2021"
 
-[lib]
-name = "sovereign_desktop_agent_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
 [[bin]]
 name = "sovereign-desktop-agent"
 path = "src/main.rs"
