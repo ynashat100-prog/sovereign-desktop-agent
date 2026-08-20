@@ -79,14 +79,18 @@ fn start_runtime(app: &AppHandle, state: State<'_, RuntimeState>) {
 
 fn stop_runtime(app: &AppHandle) {
     let state = app.state::<RuntimeState>();
-    if let Some(child) = state.child.lock().expect("runtime lock poisoned").take() {
+    let child = {
+        let mut guard = state.child.lock().expect("runtime lock poisoned");
+        guard.take()
+    };
+    if let Some(child) = child {
         let _ = child.kill();
     }
 }
 
 fn main() {
     let port = reserve_local_port().expect("unable to reserve a local runtime port");
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(RuntimeState {
             child: Mutex::new(None),
             token: Uuid::new_v4().simple().to_string(),
@@ -101,10 +105,12 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![set_always_on_top, toggle_sidebar, runtime_connection])
-        .run(|app, event| {
-            if matches!(event, RunEvent::Exit { .. }) {
-                stop_runtime(app);
-            }
-        })
-        .expect("error while running Personal Assistant");
+        .build(tauri::generate_context!())
+        .expect("error while building Personal Assistant");
+
+    app.run(|app, event| {
+        if matches!(event, RunEvent::Exit { .. }) {
+            stop_runtime(app);
+        }
+    });
 }
