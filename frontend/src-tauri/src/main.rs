@@ -1,4 +1,6 @@
-use std::sync::Mutex;
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::{fs, sync::Mutex};
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
@@ -22,12 +24,26 @@ fn toggle_sidebar(app: AppHandle) -> Result<(), String> {
 }
 
 fn start_runtime(app: &AppHandle, state: State<'_, RuntimeState>) {
+    let data_dir = match app.path().app_data_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Unable to resolve application data directory: {error}");
+            return;
+        }
+    };
+
+    if let Err(error) = fs::create_dir_all(&data_dir) {
+        eprintln!("Unable to create application data directory: {error}");
+        return;
+    }
+
+    let data_dir = data_dir.to_string_lossy().into_owned();
     match app.shell().sidecar("agent-runtime") {
-        Ok(command) => match command.spawn() {
+        Ok(command) => match command.env("AGENT_DATA_DIR", data_dir).spawn() {
             Ok((_events, child)) => *state.0.lock().expect("runtime lock poisoned") = Some(child),
-            Err(error) => eprintln!("Agent runtime unavailable; Demo Mode remains available: {error}"),
+            Err(error) => eprintln!("Agent runtime unavailable: {error}"),
         },
-        Err(error) => eprintln!("Agent runtime sidecar unavailable; Demo Mode remains available: {error}"),
+        Err(error) => eprintln!("Agent runtime sidecar unavailable: {error}"),
     }
 }
 

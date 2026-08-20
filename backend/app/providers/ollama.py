@@ -1,4 +1,4 @@
-"""Ollama local provider with graceful failure behavior."""
+"""Ollama local provider with graceful failure behavior and persisted active-model selection."""
 
 from __future__ import annotations
 
@@ -18,13 +18,35 @@ class OllamaProvider(ModelProvider):
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._selection_path = settings.agent_data_dir / "active-ollama-model.txt"
+        self._active_model = self._load_active_model() or settings.ollama_model
+
+    def _load_active_model(self) -> str | None:
+        try:
+            model = self._selection_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        return model or None
+
+    @property
+    def active_model(self) -> str:
+        return self._active_model
+
+    def set_active_model(self, model: str) -> None:
+        self._selection_path.parent.mkdir(parents=True, exist_ok=True)
+        self._selection_path.write_text(model, encoding="utf-8")
+        self._active_model = model
 
     async def status(self) -> ProviderStatus:
         try:
             async with httpx.AsyncClient(timeout=2.5) as client:
                 response = await client.get(f"{self.settings.ollama_base_url}/api/tags")
                 response.raise_for_status()
-                models = [item["name"] for item in response.json().get("models", [])]
+                installed = [item["name"] for item in response.json().get("models", [])]
+            # The active model is deliberately first so all clients display the model actually used.
+            models = ([self.active_model] if self.active_model in installed else []) + [
+                model for model in installed if model != self.active_model
+            ]
             detail = "Running" if models else "Running; no models installed"
             return ProviderStatus(
                 id=self.id,
@@ -56,7 +78,7 @@ class OllamaProvider(ModelProvider):
 
     async def generate(self, prompt: str, *, system: str = "") -> Generation:
         payload = {
-            "model": self.settings.ollama_model,
+            "model": self.active_model,
             "prompt": prompt,
             "system": system,
             "stream": False,
@@ -70,7 +92,7 @@ class OllamaProvider(ModelProvider):
             body = response.json()
         return Generation(
             text=body.get("response", ""),
-            model=body.get("model", self.settings.ollama_model),
+            model=body.get("model", self.active_model),
             provider=self.id,
             local=True,
         )

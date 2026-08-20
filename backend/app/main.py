@@ -14,9 +14,12 @@ from fastapi.responses import StreamingResponse
 
 from app.core.config import settings
 from app.models.schemas import (
+    DangerousToolsSettings,
     MessageRequest,
+    OllamaModelSelectionRequest,
     OllamaPullRequest,
     PermissionDecision,
+    ProviderModelDiscoveryRequest,
     ProviderStatus,
     ProviderUpsertRequest,
     RuntimeStatus,
@@ -55,10 +58,15 @@ async def lifespan(_: FastAPI):
     agent.stop()
 
 
-app = FastAPI(title="Sovereign Desktop Agent Runtime", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Personal Assistant Runtime", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:1420", "tauri://localhost"],
+    allow_origins=[
+        "http://localhost:1420",
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+    ],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -194,6 +202,30 @@ async def test_provider(provider_id: str):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/v1/providers/discover-models")
+async def discover_provider_models(request: ProviderModelDiscoveryRequest):
+    try:
+        return {"models": await provider_registry.discover_models(
+            base_url=request.base_url, api_key=request.api_key
+        )}
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/models/active")
+async def set_active_ollama_model(request: OllamaModelSelectionRequest):
+    status = await ollama_provider.status()
+    if not status.available:
+        raise HTTPException(status_code=409, detail="Ollama is not running")
+    if request.model not in status.models:
+        raise HTTPException(status_code=400, detail="Select an installed Ollama model")
+    try:
+        ollama_provider.set_active_model(request.model)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Unable to save active model choice") from exc
+    return {"model": ollama_provider.active_model}
+
+
 @app.post("/v1/models/pull")
 async def pull_model(request: OllamaPullRequest, session_id: str):
     run_id = f"model:{uuid4()}"
@@ -236,6 +268,17 @@ async def submit_message(request: MessageRequest):
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
     return await agent.run(request)
+
+
+@app.get("/v1/permissions/settings", response_model=DangerousToolsSettings)
+async def permission_settings() -> DangerousToolsSettings:
+    return DangerousToolsSettings(enabled=agent.permissions.dangerous_tools_enabled)
+
+
+@app.post("/v1/permissions/settings", response_model=DangerousToolsSettings)
+async def update_permission_settings(settings_request: DangerousToolsSettings) -> DangerousToolsSettings:
+    agent.permissions.dangerous_tools_enabled = settings_request.enabled
+    return DangerousToolsSettings(enabled=agent.permissions.dangerous_tools_enabled)
 
 
 @app.post("/v1/permissions")

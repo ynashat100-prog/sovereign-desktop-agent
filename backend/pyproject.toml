@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sovereign-desktop-agent-runtime"
-version = "0.1.0"
-description = "Local-first FastAPI runtime for Sovereign Desktop Agent"
+version = "0.2.0"
+description = "Local-first FastAPI runtime for Personal Assistant"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1.0",
@@ -15,6 +15,7 @@ dependencies = [
   "pydantic-settings>=2.4,<3.0",
   "psutil>=6.0,<7.0",
   "pyperclip>=1.9,<2.0",
+  "pillow>=10.4,<12.0",
   "keyring>=25.3,<26.0",
   "lancedb>=0.13,<1.0",
   "pyarrow>=17,<20",

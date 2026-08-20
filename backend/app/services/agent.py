@@ -21,13 +21,16 @@ from app.services.router import SmartRouter
 from app.services.traces import TraceHub
 from app.tools.catalog import TOOLS
 
-_SYSTEM_PROMPT = """You are a desktop assistant. You must never claim that you executed a system action.
-When a tool is useful, respond with exactly one line in this format:
+_SYSTEM_PROMPT = """You are a private desktop assistant. You must never claim that you executed a system action.
+When a listed tool is useful, respond with exactly one line in this format:
 TOOL: tool.name | {"argument":"value"} | short rationale
-Available tools: system.active_context, filesystem.read_text, filesystem.search,
-filesystem.create_file, filesystem.create_folder, filesystem.open, application.open,
-clipboard.read, clipboard.write, terminal.run.
-All write actions require confirmation. For ordinary questions, respond normally and concisely."""
+Available tools: system.active_context, application.list, application.open, filesystem.read_text,
+filesystem.search, filesystem.write_text, filesystem.create_file, filesystem.create_folder,
+filesystem.open, filesystem.delete, clipboard.read, clipboard.write, system.get_clipboard,
+system.set_clipboard, system.screenshot, system.volume, system.brightness,
+system.open_settings, web.search, terminal.run, system.run_command.
+Never request or invent a tool outside this list. The permission engine—not you—decides whether
+an action runs. For ordinary questions, respond normally and concisely."""
 
 
 class AgentService:
@@ -74,10 +77,32 @@ class AgentService:
             run.ensure_active()
 
             if route.mode == "fast":
+                direct_tool = self._deterministic_tool(request.text)
+                if direct_tool and self.permissions.requires_approval(direct_tool):
+                    run.transition(RunState.PLANNING)
+                    run.transition(RunState.AWAITING_PERMISSION)
+                    self.permissions.request(run_id, direct_tool)
+                    await self._trace(
+                        request,
+                        run_id,
+                        "permission",
+                        "Permission confirmation required",
+                        tool=direct_tool.name,
+                    )
+                    return self._response(
+                        run,
+                        request,
+                        run_id,
+                        f"Permission required for {direct_tool.name}. Review the requested action in the UI.",
+                        started,
+                        [direct_tool],
+                    )
                 run.transition(RunState.EXECUTING)
-                result = await self._fast_task(request.text, request, run_id)
+                result = await self._fast_task(request.text, request, run_id, direct_tool)
                 run.transition(RunState.COMPLETED)
-                return self._response(run, request, run_id, result, started)
+                return self._response(
+                    run, request, run_id, result, started, [direct_tool] if direct_tool else None
+                )
 
             if route.mode == "demo" or request.demo_mode or self.settings.agent_demo_mode:
                 run.transition(RunState.PLANNING)
@@ -168,21 +193,154 @@ class AgentService:
         self.permissions.clear()
         return count
 
-    async def _fast_task(self, text: str, request: MessageRequest, run_id: str) -> str:
+    async def _fast_task(
+        self,
+        text: str,
+        request: MessageRequest,
+        run_id: str,
+        direct_tool: ToolCall | None = None,
+    ) -> str:
         lowered = text.lower()
         if "time" in lowered or "الوقت" in lowered:
             from datetime import datetime
 
             return f"Local time: {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')}"
-        if any(word in lowered for word in ("process", "التطبيق", "النشط")):
-            tool = ToolCall(
-                name="system.active_context",
-                arguments={},
-                permission=TOOLS["system.active_context"].permission,
-                rationale="Requested local process context",
+        if direct_tool:
+            return await self._execute_tool(direct_tool, request, run_id, self.runs[run_id])
+        return "I recognized a local request, but I need a more specific file path, query, or action."
+
+    @staticmethod
+    def _tool_call(name: str, arguments: dict[str, object], rationale: str) -> ToolCall:
+        return ToolCall(
+            name=name,
+            arguments=arguments,
+            permission=TOOLS[name].permission,
+            rationale=rationale,
+        )
+
+    def _deterministic_tool(self, text: str) -> ToolCall | None:
+        """Map conservative, explicit requests to allow-listed local actions.
+
+        This gives core desktop tasks a reliable path even when a local model is unavailable.
+        Broad or ambiguous requests intentionally return ``None`` and remain model-mediated.
+        """
+        lowered = text.lower().strip()
+
+        if any(term in lowered for term in ("التطبيقات المثبتة", "البرامج المثبتة", "installed apps")):
+            return self._tool_call("application.list", {}, "Requested installed application list")
+        if any(term in lowered for term in ("العمليات", "البرامج النشطة", "active processes")):
+            return self._tool_call("system.active_context", {}, "Requested local process context")
+        if any(term in lowered for term in ("لقطة شاشة", "صورة للشاشة", "screenshot")):
+            return self._tool_call("system.screenshot", {}, "Requested a local screenshot")
+
+        search_match = re.search(
+            r"(?:ابحث(?: على الإنترنت)? عن|search (?:the )?web for|web search)\s+(.+)$",
+            text,
+            re.IGNORECASE,
+        )
+        if search_match:
+            return self._tool_call(
+                "web.search",
+                {"query": search_match.group(1).strip()},
+                "Requested public web search",
             )
-            return await self._execute_tool(tool, request, run_id, self.runs[run_id])
-        return "I recognized a simple request, but it does not match an enabled deterministic tool yet."
+
+        brightness_match = re.search(r"(?:السطوع|brightness).*?(\d{1,3})", lowered)
+        if brightness_match:
+            return self._tool_call(
+                "system.brightness",
+                {"level": int(brightness_match.group(1))},
+                "Requested display brightness change",
+            )
+        if any(term in lowered for term in ("ارفع الصوت", "زود الصوت", "volume up")):
+            return self._tool_call("system.volume", {"action": "up"}, "Requested volume increase")
+        if any(term in lowered for term in ("اخفض الصوت", "قلل الصوت", "volume down")):
+            return self._tool_call("system.volume", {"action": "down"}, "Requested volume decrease")
+        if any(term in lowered for term in ("اكتم الصوت", "كتم الصوت", "mute")):
+            return self._tool_call("system.volume", {"action": "mute"}, "Requested volume mute")
+
+        settings_pages = {
+            "الشاشة": "display",
+            "العرض": "display",
+            "display settings": "display",
+            "الصوت": "sound",
+            "sound settings": "sound",
+            "البلوتوث": "bluetooth",
+            "bluetooth": "bluetooth",
+            "الشبكة": "network",
+            "network settings": "network",
+            "الخصوصية": "privacy",
+            "privacy settings": "privacy",
+        }
+        if "إعدادات" in text or "settings" in lowered:
+            for term, page in settings_pages.items():
+                if term in lowered:
+                    return self._tool_call(
+                        "system.open_settings", {"page": page}, "Requested Windows Settings page"
+                    )
+
+        folder_match = re.search(
+            r"(?:أنشئ|انشئ|create)\s+(?:مجلد|folder)\s+(.+)$", text, re.IGNORECASE
+        )
+        if folder_match:
+            return self._tool_call(
+                "filesystem.create_folder",
+                {"path": folder_match.group(1).strip(" '\"“”")},
+                "Requested new folder",
+            )
+
+        file_search = re.search(
+            r"(?:ابحث عن ملف|search (?:for )?file)\s+(.+)$", text, re.IGNORECASE
+        )
+        if file_search:
+            query = file_search.group(1).strip(" '\"“”")
+            return self._tool_call(
+                "filesystem.search",
+                {"pattern": f"*{query}*"},
+                "Requested local file search",
+            )
+
+        read_match = re.search(r"(?:اقرأ ملف|read file)\s+(.+)$", text, re.IGNORECASE)
+        if read_match:
+            return self._tool_call(
+                "filesystem.read_text",
+                {"path": read_match.group(1).strip(" '\"“”")},
+                "Requested text file read",
+            )
+
+        open_path_match = re.search(
+            r"(?:افتح (?:الملف|المجلد)|open (?:file|folder))\s+(.+)$", text, re.IGNORECASE
+        )
+        if open_path_match:
+            return self._tool_call(
+                "filesystem.open",
+                {"path": open_path_match.group(1).strip(" '\"“”")},
+                "Requested local file or folder open",
+            )
+
+        app_match = re.search(r"(?:افتح برنامج|open app)\s+([\w.-]+)$", text, re.IGNORECASE)
+        if app_match:
+            return self._tool_call(
+                "application.open",
+                {"executable": app_match.group(1)},
+                "Requested application start",
+            )
+
+        delete_match = re.search(
+            r"(?:احذف (?:ملف|مجلد)|delete (?:file|folder))\s+(.+)$", text, re.IGNORECASE
+        )
+        if delete_match:
+            path = delete_match.group(1).strip(" '\"“”")
+            recursive = any(term in lowered for term in ("بكل محتوياته", "recursively"))
+            return self._tool_call(
+                "filesystem.delete",
+                {"path": path, "recursive": recursive},
+                "Requested permanent deletion",
+            )
+
+        if any(term in lowered for term in ("اقرأ الحافظة", "محتوى الحافظة", "read clipboard")):
+            return self._tool_call("system.get_clipboard", {}, "Requested clipboard contents")
+        return None
 
     async def _execute_tool(
         self, tool: ToolCall, request: MessageRequest, run_id: str, run: AgentRun

@@ -19,7 +19,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [selectedCloud, setSelectedCloud] = useState<CustomProvider | undefined>();
-  const { status, setup, traces, connected, error, submit, stop, listProviders, saveProvider, deleteProvider, testProvider, pullModel, clearTraces } = useRuntime(SESSION_ID);
+  const [pendingApproval, setPendingApproval] = useState<AgentResponse | null>(null);
+  const { status, setup, traces, connected, error, dangerousToolsEnabled, submit, stop, decidePermission, setDangerousTools, listProviders, saveProvider, deleteProvider, testProvider, discoverProviderModels, setActiveModel, pullModel, clearTraces } = useRuntime(SESSION_ID);
   const t = useMemo(() => (key: Parameters<typeof translate>[1]) => translate(locale, key), [locale]);
 
   useEffect(() => {
@@ -47,6 +48,7 @@ export default function App() {
         cloudConsent: usingCloud,
       });
       setConversation((items) => [...items, { role: "agent", text: response.message }]);
+      if (response.state === "awaiting_permission" && response.tool_calls.length > 0) setPendingApproval(response);
     } catch {
       setConversation((items) => [...items, { role: "agent", text: error || t("runtimeUnavailable") }]);
     } finally {
@@ -56,7 +58,22 @@ export default function App() {
 
   async function emergencyStop() {
     await stop();
+    setPendingApproval(null);
     setBusy(false);
+  }
+
+  async function resolvePermission(decision: "allow_once" | "allow_always" | "deny") {
+    if (!pendingApproval || busy) return;
+    setBusy(true);
+    try {
+      const response = await decidePermission(pendingApproval.run_id, decision);
+      setConversation((items) => [...items, { role: "agent", text: response.message }]);
+    } catch {
+      setConversation((items) => [...items, { role: "agent", text: decision === "deny" ? t("permissionDenied") : t("permissionFailed") }]);
+    } finally {
+      setPendingApproval(null);
+      setBusy(false);
+    }
   }
 
   return (
@@ -76,12 +93,13 @@ export default function App() {
       </section>
 
       <section className="model-strip">
-        <span className={`status-dot ${status?.ollama.available ? "ready" : "warning"}`} /><div><small>{t("model")}</small><strong>{status?.ollama.models[0] || "Qwen2.5-Coder 7B"}</strong></div>
-        <div className="model-status"><small>{t("status")}</small><strong>{status?.ollama.available ? t("ready") : t("demo")}</strong></div>
+        <span className={`status-dot ${status?.ollama.available ? "ready" : "warning"}`} /><div><small>{t("model")}</small><strong>{status ? (status.ollama.models[0] ?? t("noActiveModel")) : t("modelWaiting")}</strong></div>
+        <div className="model-status"><small>{t("status")}</small><strong>{!status ? t("runtimeWaiting") : status.ollama.available ? t("ready") : t("unavailable")}</strong></div>
       </section>
 
       <section className="chat" aria-label={t("appName")}>
         {conversation.length === 0 ? <div className="empty-chat"><div className="empty-icon"><Bot size={27} /></div><h1>{t("appName")}</h1><p>{t("secureLocal")}. {t("chatIntro")}</p></div> : conversation.map((item, index) => <article key={`${item.role}-${index}`} className={`message ${item.role}`}><span>{item.role === "user" ? t("you") : t("agent")}</span><p>{item.text}</p></article>)}
+        {pendingApproval && pendingApproval.tool_calls[0] && <section className="permission-card"><div><ShieldCheck size={18} /><strong>{t("permissionRequired")}</strong></div><p>{t("permissionActionDetails")}</p><code>{pendingApproval.tool_calls[0].name}</code><small>{pendingApproval.tool_calls[0].rationale}</small><pre>{JSON.stringify(pendingApproval.tool_calls[0].arguments, null, 2)}</pre><div className="permission-actions"><button className="secondary" disabled={busy} onClick={() => void resolvePermission("deny")}>{t("deny")}</button><button className="secondary" disabled={busy} onClick={() => void resolvePermission("allow_once")}>{t("allowOnce")}</button>{pendingApproval.tool_calls[0].permission !== "dangerous" && <button className="primary" disabled={busy} onClick={() => void resolvePermission("allow_always")}>{t("allowAlways")}</button>}</div></section>}
       </section>
 
       <div className="composer">
@@ -91,7 +109,7 @@ export default function App() {
 
       <div className="workspace-actions"><button className="secondary" onClick={() => { setConversation([]); clearTraces(); }}><Plus size={16} /> {t("newChat")}</button><button className="stop" disabled={!busy} onClick={() => void emergencyStop()}><XOctagon size={16} /> {t("stopAgent")}</button></div>
       <TracePanel locale={locale} traces={traces} connected={connected} />
-      {showSettings && <SettingsPanel locale={locale} status={status} listProviders={listProviders} saveProvider={saveProvider} deleteProvider={deleteProvider} testProvider={testProvider} pullModel={pullModel} selectedProvider={selectedCloud?.id} onSelectProvider={setSelectedCloud} />}
+      {showSettings && <SettingsPanel locale={locale} status={status} listProviders={listProviders} saveProvider={saveProvider} deleteProvider={deleteProvider} testProvider={testProvider} discoverProviderModels={discoverProviderModels} setActiveModel={setActiveModel} pullModel={pullModel} dangerousToolsEnabled={dangerousToolsEnabled} setDangerousTools={setDangerousTools} selectedProvider={selectedCloud?.id} onSelectProvider={setSelectedCloud} />}
       {showSetup && <SetupWizard locale={locale} checks={setup?.checks ?? []} onComplete={() => { localStorage.setItem("setupComplete", "true"); setShowSetup(false); }} />}
     </main>
   );

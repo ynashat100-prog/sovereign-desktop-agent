@@ -69,6 +69,15 @@ class OllamaPullRequest(BaseModel):
     model: str = Field(min_length=1, max_length=200, pattern=r"^[a-zA-Z0-9._:/-]+$")
 
 
+class OllamaModelSelectionRequest(BaseModel):
+    model: str = Field(min_length=1, max_length=200, pattern=r"^[a-zA-Z0-9._:/-]+$")
+
+
+class ProviderModelDiscoveryRequest(BaseModel):
+    base_url: str = Field(min_length=8, max_length=500)
+    api_key: str = Field(min_length=1, max_length=500)
+
+
 class ToolCall(BaseModel):
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
@@ -79,6 +88,10 @@ class ToolCall(BaseModel):
 class PermissionDecision(BaseModel):
     run_id: str
     decision: Literal["allow_once", "allow_always", "deny"]
+
+
+class DangerousToolsSettings(BaseModel):
+    enabled: bool
 
 
 class AgentResponse(BaseModel):
