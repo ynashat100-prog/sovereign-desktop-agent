@@ -1,28 +1,32 @@
-# Contributing to Sovereign Desktop Agent
+<div dir="rtl">
 
-Thank you for contributing. This project treats **security, local-first privacy, and reliability** as higher priorities than feature breadth or cloud convenience.
+# المساهمة في وكيل سطح المكتب السيادي
 
-## Before opening a pull request
+شكرًا لمساهمتك. يعطي هذا المشروع **الأمان والخصوصية المحلية أولًا والموثوقية** أولوية أعلى من كثرة الميزات أو سهولة الاعتماد على السحابة.
 
-Create a focused branch, explain the user-facing motivation, and avoid mixing unrelated refactors with behavioral changes. Any change that introduces a new tool, provider, data store, or permission must include tests and a short threat assessment in the pull request description.
+## قبل فتح Pull Request
 
-| Check | Command |
+أنشئ فرعًا واضح النطاق، واشرح الدافع الذي يخص المستخدم، ولا تخلط إعادة هيكلة غير مرتبطة بتغيير سلوكي في الطلب نفسه. كل تعديل يضيف أداة أو مزودًا أو مخزن بيانات أو صلاحية جديدة يجب أن يتضمن اختبارات وتقييمًا موجزًا للمخاطر في وصف Pull Request.
+
+| الفحص | الأمر |
 | --- | --- |
-| Backend lint | `cd backend && ruff check app tests` |
-| Backend tests | `cd backend && pytest -q` |
-| Frontend production build | `cd frontend && pnpm build` |
-| Windows package | Run the `windows-package.yml` workflow or build on Windows as documented in the README. |
+| تدقيق المحرك الخلفي | `cd backend && ruff check app tests` |
+| اختبارات المحرك الخلفي | `cd backend && pytest -q` |
+| بناء إنتاجي للواجهة | `cd frontend && pnpm build` |
+| حزمة Windows | شغّل سير عمل `Windows Release` أو ابنِ على Windows وفق README. |
 
-## Security requirements
+## متطلبات الأمان
 
-Never commit API keys, credentials, `.env` files, model weights, user conversations, screenshots, database contents, installers, virtual environments, or `node_modules`. Do not add generic shell execution, delete functionality, registry changes, elevation, or network exfiltration through an agent tool without an explicit design review.
+لا تلتزم أبدًا بمفاتيح API أو بيانات الاعتماد أو ملفات `.env` أو أوزان النماذج أو محادثات المستخدمين أو لقطات الشاشة أو محتويات قواعد البيانات أو المثبتات أو البيئات الافتراضية أو `node_modules`. لا تضف تنفيذًا عامًا للطرفية أو وظائف الحذف أو تعديل Registry أو رفع الصلاحيات أو استخراج البيانات عبر الشبكة من خلال أداة وكيل دون مراجعة تصميم صريحة.
 
-The AI model may suggest an action, but it must not decide permission level, invoke operating-system commands directly, or bypass the allow-list. A new tool must declare a deterministic safety tier and include a test covering the denied path.
+قد يقترح نموذج الذكاء الاصطناعي إجراءً، لكنه لا يحدد مستوى الصلاحية ولا يستدعي أوامر نظام التشغيل مباشرة ولا يتجاوز قائمة السماح. يجب أن تعلن كل أداة جديدة مستوى سلامة حتميًا وأن تتضمن اختبارًا لمسار الرفض.
 
-## Provider changes
+## تعديلات المزودات
 
-Custom-provider metadata may be stored without secrets. API keys must use the operating system credential store and must never appear in logs, traces, API responses, screenshots, or tests. Cloud processing must remain off by default and require a named provider plus an explicit consent signal per request.
+يمكن تخزين البيانات الوصفية للمزود المخصص من دون أسرار. يجب أن تستخدم مفاتيح API مخزن بيانات اعتماد نظام التشغيل، وألا تظهر في السجلات أو التتبعات أو استجابات API أو لقطات الشاشة أو الاختبارات. يجب أن تبقى المعالجة السحابية معطلة افتراضيًا، وأن تتطلب مزودًا مسمى وموافقة صريحة لكل طلب.
 
-## Style and documentation
+## الأسلوب والتوثيق
 
-Use TypeScript for the UI and typed Python for the runtime. Keep UI strings in the localization dictionary and retain Arabic-first RTL behavior. Document any limitation honestly; do not use placeholders or mocks to claim that an unavailable system feature is implemented.
+استخدم TypeScript للواجهة وPython المعرّف الأنواع للمحرك. احتفظ بنصوص الواجهة في قاموس الترجمة وحافظ على سلوك العربية أولًا ودعم RTL. وثّق أي قيد بصدق؛ ولا تستخدم مواضع بديلة أو محاكاة للادعاء بأن ميزة نظام غير متاحة قد تم تنفيذها.
+
+</div>

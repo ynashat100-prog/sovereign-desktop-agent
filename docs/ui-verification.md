@@ -1,7 +1,13 @@
-# UI verification notes
+<div dir="rtl">
 
-- **Date:** 2026-08-20
-- **Target:** React/Vite development UI at `http://localhost:1420/`
-- **Result:** The sidebar shell, Local Only privacy banner, model status, chat composer, live trace panel, and the first-run wizard render successfully.
-- **Localization:** The second visual check confirmed that the Arabic-first UI no longer mixes English onboarding or trace text. The document direction is RTL and the language/theme controls are visible.
-- **Runtime behavior:** The runtime was intentionally unavailable during this browser-only verification, and the UI correctly exposed Demo Mode/Offline state instead of failing.
+# ملاحظات التحقق البصري من الواجهة
+
+| البند | القيمة |
+| --- | --- |
+| **التاريخ** | 2026-08-20 |
+| **الهدف** | واجهة React/Vite التطويرية على `http://localhost:1420/` |
+| **النتيجة** | ظهر غلاف الشريط الجانبي وشريط خصوصية «محلي فقط» وحالة النموذج ومحرر المحادثة ولوحة السجل الحي ومعالج الإعداد الأول بنجاح. |
+| **التوطين** | أكد الفحص البصري الثاني أن الواجهة العربية أولًا لا تخلط نصوص إعداد أو تتبع إنجليزية، وأن اتجاه المستند RTL وعناصر اللغة والمظهر ظاهرة. |
+| **سلوك المحرك** | لم يكن المحرك متاحًا عمدًا أثناء التحقق المعتمد على المتصفح فقط؛ لذلك عرضت الواجهة وضع العرض التجريبي/دون اتصال بدل الفشل. |
+
+</div>

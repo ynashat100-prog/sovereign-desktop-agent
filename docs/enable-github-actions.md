@@ -1,21 +1,28 @@
-# Activating the GitHub Actions templates
+<div dir="rtl">
 
-The repository contains tested workflow templates in [`docs/github-workflows/`](github-workflows/). They are stored as documentation templates rather than active workflow files only because the access token used for the initial automated publication did not have GitHub’s separate `workflows` permission. This constraint does **not** affect the source, tests, Windows build scripts, or installer configuration.
+# سير عمل GitHub Actions لإصدار Windows
 
-To activate CI after cloning the repository, copy the templates into GitHub’s active workflow directory and commit them with a token or browser session that has permission to update workflow files:
+سير العمل الفعّال موجود الآن في [`.github/workflows/windows-release.yml`](../.github/workflows/windows-release.yml) تحت اسم **Windows Release**. يعمل على بيئة `windows-latest`، وينشئ مثبت NSIS لنظام Windows x64.
 
-```bash
-mkdir -p .github/workflows
-cp docs/github-workflows/ci.yml .github/workflows/ci.yml
-cp docs/github-workflows/windows-package.yml .github/workflows/windows-package.yml
-git add .github/workflows
-git commit -m "ci: activate quality and Windows package workflows"
-git push
-```
+## ما الذي يتحقق منه السير؟
 
-| Template | Trigger | Outcome |
-| --- | --- | --- |
-| `ci.yml` | Pushes and pull requests to `main` | Runs backend lint/tests and frontend lint/production build. |
-| `windows-package.yml` | Manual trigger or `v*` tag | Builds the Python sidecar and NSIS x64 installer on `windows-latest`, then uploads the `.exe` as an artifact. |
+| المرحلة | النتيجة المتوقعة |
+| --- | --- |
+| إعداد بيئة Windows | تجهيز Python وpnpm وNode.js وRust لهدف `x86_64-pc-windows-msvc`. |
+| جودة المحرك الخلفي | تشغيل `ruff check app tests` و`pytest -q`. |
+| العملية الجانبية | بناء Python/FastAPI عبر PyInstaller ثم تشغيلها وفحص نقطة `/health`. |
+| جودة الواجهة | تثبيت تبعيات الواجهة ثم تشغيل `pnpm lint`. |
+| الحزمة | بناء Tauri مع هدف Windows x64 ثم إنتاج ملف NSIS `.exe`. |
+| الإخراج | رفع المثبت Artifact؛ وعند دفع وسم يبدأ بـ `v`، نشره أيضًا في GitHub Release. |
 
-> The Windows workflow is deliberately kept intact and ready to activate. It is not represented as active in this published revision because doing so would have caused the entire initial push to be rejected.
+## تشغيله يدويًا
+
+من صفحة **Actions** في المستودع، افتح **Windows Release** ثم اختر **Run workflow** على الفرع `main`. سيظهر ملف المثبت بعد نجاح المهمة داخل قسم Artifacts في التنفيذ.
+
+## نشر إصدار جديد
+
+أنشئ وسمًا يبدأ بحرف `v` مثل `v0.2.0` وادفعه إلى GitHub. يشغل الوسم السير تلقائيًا، وبعد نجاح الفحوصات ينشر ملف `.exe` في صفحة الإصدار المطابقة.
+
+> لا تضع مفاتيح API أو أي بيانات سرية في متغيرات السير أو ملفات المستودع. ملف المثبت لا يتضمن Ollama ولا نموذجًا لغويًا؛ يظل تنزيلهما قرارًا محليًا للمستخدم.
+
+</div>
