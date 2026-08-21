@@ -1,6 +1,6 @@
 [package]
 name = "sovereign-desktop-agent"
-version = "0.2.1"
+version = "0.2.2"
 description = "Local-first Personal Assistant for Windows"
 authors = ["Personal Assistant contributors"]
 edition = "2021"

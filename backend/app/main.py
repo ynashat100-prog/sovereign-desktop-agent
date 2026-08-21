@@ -59,7 +59,7 @@ async def lifespan(_: FastAPI):
     agent.stop()
 
 
-app = FastAPI(title="Personal Assistant Runtime", version="0.2.1", lifespan=lifespan)
+app = FastAPI(title="Personal Assistant Runtime", version="0.2.2", lifespan=lifespan)
 _ALLOWED_ORIGINS = {
     "http://localhost:1420",
     "tauri://localhost",
