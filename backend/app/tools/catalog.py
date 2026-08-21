@@ -35,6 +35,22 @@ class RegisteredTool:
 
 _CONTENT_FOLDERS = ("Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos")
 
+# Single argument a tool can be repaired with when a local model emits a bare value instead of
+# JSON. Dangerous tools are deliberately absent: a malformed dangerous request is rejected,
+# never guessed.
+PRIMARY_ARGUMENTS: dict[str, str] = {
+    "filesystem.read_text": "path",
+    "filesystem.search": "pattern",
+    "filesystem.create_folder": "path",
+    "filesystem.open": "path",
+    "application.open": "executable",
+    "clipboard.write": "text",
+    "system.volume": "action",
+    "system.brightness": "level",
+    "system.open_settings": "page",
+    "web.search": "query",
+}
+
 
 def _path(value: str) -> Path:
     raw = Path(value).expanduser()

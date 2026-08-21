@@ -154,3 +154,34 @@ def test_trace_websocket_requires_trusted_origin_and_runtime_token():
             subprotocols=["agent-runtime", settings.agent_runtime_token],
         ) as websocket:
             assert websocket.accepted_subprotocol == "agent-runtime"
+
+
+def test_rejected_foreign_decision_keeps_the_owner_card_usable():
+    session_id = "owner-session-recovery"
+    with runtime_client() as client:
+        response = client.post("/v1/messages", json={"text": "خذ لقطة شاشة", "session_id": session_id})
+        run_id = response.json()["run_id"]
+        hijack = client.post(
+            "/v1/permissions",
+            json={"run_id": run_id, "session_id": "attacker-session", "decision": "allow_once"},
+        )
+        owner = client.post(
+            "/v1/permissions",
+            json={"run_id": run_id, "session_id": session_id, "decision": "deny"},
+        )
+    assert hijack.status_code == 403
+    assert owner.status_code == 403
+    assert "denied" in owner.json()["detail"]
+    assert run_id not in agent.runs
+
+
+def test_runtime_failures_reach_the_client_as_codes_not_exception_text():
+    with runtime_client() as client:
+        response = client.post(
+            "/v1/messages",
+            json={"text": "احذف ملف Documents/report.txt", "session_id": "code-session"},
+        )
+    body = response.json()
+    assert response.status_code == 200
+    assert body["state"] == "failed"
+    assert body["message"] == "AGENT_ERROR:DANGEROUS_TOOLS_DISABLED"
