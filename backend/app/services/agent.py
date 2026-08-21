@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from time import perf_counter
 from uuid import uuid4
@@ -21,7 +22,7 @@ from app.providers.base import ModelProvider
 from app.services.permissions import PermissionManager
 from app.services.router import SmartRouter
 from app.services.traces import TraceHub
-from app.tools.catalog import TOOLS
+from app.tools.catalog import PRIMARY_ARGUMENTS, TOOLS
 
 _SYSTEM_PROMPT = """You are a private desktop assistant. You must never claim that you executed a system action.
 When a listed tool is useful, respond with exactly one line in this format:
@@ -32,6 +33,27 @@ filesystem.open, filesystem.delete, clipboard.read, clipboard.write, system.scre
 system.volume, system.brightness, system.open_settings, web.search, terminal.run.
 Never request or invent a tool outside this list. The permission engine—not you—decides whether
 an action runs. For ordinary questions, respond normally and concisely."""
+
+_PROTOCOL_PREFIX = "TOOL:"
+_CODE_FENCE = re.compile(r"```[\w-]*")
+_WHITESPACE = re.compile(r"\s+")
+_STRICT_TOOL_LINE = re.compile(
+    rf"^{_PROTOCOL_PREFIX}\s*(?P<name>[\w.]+)\s*\|\s*(?P<arguments>\{{.*\}})\s*(?:\|\s*(?P<rationale>.*))?$",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _normalize(text: str) -> str:
+    return _WHITESPACE.sub(" ", text).strip()
+
+
+# A small model often reflows and echoes its own instructions, so matching is done on
+# normalized text and whole sentences rather than on the prompt's original line breaks.
+_PROMPT_NORMALIZED = _normalize(_SYSTEM_PROMPT)
+_PROMPT_SENTENCES = frozenset(
+    sentence.strip() for sentence in _PROMPT_NORMALIZED.split(". ") if len(sentence.strip()) > 25
+)
+_DEFAULT_RATIONALE = "Requested by the local model"
 
 
 class AgentService:
@@ -165,12 +187,13 @@ class AgentService:
                 model=generation.model,
             )
             run.transition(RunState.COMPLETED)
-            return self._response(run, request, run_id, generation.text, started)
+            return self._response(run, request, run_id, self._user_message(generation.text), started)
         except Exception as exc:
             if run.state != RunState.STOPPED:
                 run.state = RunState.FAILED
-            await self._trace(request, run_id, "error", f"Runtime error: {exc}")
-            return self._response(run, request, run_id, f"Feature unavailable: {exc}", started)
+            code = self._failure_code(exc)
+            await self._trace(request, run_id, "error", f"Runtime error: {exc}", code=code)
+            return self._response(run, request, run_id, f"AGENT_ERROR:{code}", started)
         finally:
             if run.state != RunState.AWAITING_PERMISSION:
                 self.runs.pop(run_id, None)
@@ -188,7 +211,10 @@ class AgentService:
             run.transition(RunState.COMPLETED)
             return self._response(run, request, run_id, result, started, [tool])
         except PermissionError:
-            run.state = RunState.FAILED
+            # A rejected attempt from a non-owning session must not destroy the owner's card:
+            # the run only fails when its pending request is genuinely resolved or denied.
+            if not self.permissions.has_pending(run_id):
+                run.state = RunState.FAILED
             raise
         finally:
             if run.state != RunState.AWAITING_PERMISSION:
@@ -367,23 +393,111 @@ class AgentService:
         await self._trace(request, run_id, "result", "Tool completed", tool=tool.name)
         return f"{tool.name} completed: {result}"
 
-    def _parse_tool(self, text: str) -> ToolCall | None:
-        match = re.match(
-            r"^TOOL:\s*([\w.]+)\s*\|\s*(\{.*\})\s*\|\s*(.+)$", text.strip(), re.DOTALL
-        )
-        if not match:
-            return None
-        import json
+    @staticmethod
+    def _model_lines(text: str) -> list[str]:
+        """Split model output into trimmed lines with Markdown code fences removed."""
+        return [line.strip() for line in _CODE_FENCE.sub("", text or "").splitlines()]
 
-        name, raw_args, rationale = match.groups()
-        try:
-            arguments = json.loads(raw_args)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid tool JSON: {exc.msg}") from exc
+    @classmethod
+    def _tool_line(cls, text: str) -> str | None:
+        """Return the tool-protocol line wherever the model placed it in its answer."""
+        for line in cls._model_lines(text):
+            if line.upper().startswith(_PROTOCOL_PREFIX):
+                return line
+        return None
+
+    @classmethod
+    def _is_echoed_instruction(cls, line: str) -> bool:
+        """Detect a line that merely repeats the runtime's own instructions to the model."""
+        normalized = _normalize(line)
+        if len(normalized) <= 25:
+            return False
+        if normalized in _PROMPT_NORMALIZED:
+            return True
+        return any(sentence in normalized for sentence in _PROMPT_SENTENCES)
+
+    @classmethod
+    def _user_message(cls, text: str) -> str:
+        """Strip protocol and echoed-instruction lines so internals never reach the user."""
+        kept = [
+            line
+            for line in cls._model_lines(text)
+            if line
+            and not line.upper().startswith(_PROTOCOL_PREFIX)
+            and not cls._is_echoed_instruction(line)
+        ]
+        message = "\n".join(kept).strip()
+        if not message:
+            raise ValueError("Model output was unusable")
+        return message
+
+    @staticmethod
+    def _tool_arguments(name: str, raw: str) -> dict[str, object]:
+        """Read JSON arguments, repairing a bare value only for non-dangerous tools."""
+        value = raw.strip().strip("'\"“”")
+        if not value:
+            return {}
+        if value.startswith("{"):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid tool JSON: {exc.msg}") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("Tool arguments must be a JSON object")
+            return parsed
+        primary = PRIMARY_ARGUMENTS.get(name)
+        if not primary:
+            raise ValueError(f"Malformed tool request for {name}")
+        return {primary: value}
+
+    def _parse_tool(self, text: str) -> ToolCall | None:
+        line = self._tool_line(text)
+        if line is None:
+            return None
+        strict = _STRICT_TOOL_LINE.match(line)
+        if strict:
+            name = strict.group("name")
+            raw_arguments = strict.group("arguments")
+            rationale = (strict.group("rationale") or "").strip()
+        else:
+            fields = [field.strip() for field in line[len(_PROTOCOL_PREFIX) :].split("|")]
+            name = fields[0]
+            raw_arguments = fields[1] if len(fields) > 1 else ""
+            rationale = fields[2] if len(fields) > 2 else ""
         if name not in TOOLS:
             raise ValueError(f"Tool is not allow-listed: {name}")
+        arguments = self._tool_arguments(name, raw_arguments)
         permission = self.permissions.permission_for(name, arguments)
-        return ToolCall(name=name, arguments=arguments, permission=permission, rationale=rationale)
+        return ToolCall(
+            name=name,
+            arguments=arguments,
+            permission=permission,
+            rationale=rationale or _DEFAULT_RATIONALE,
+        )
+
+    @staticmethod
+    def _failure_code(exc: Exception) -> str:
+        """Map an internal failure to a stable code the UI localizes for the user."""
+        detail = str(exc)
+        if isinstance(exc, PermissionError):
+            if "Dangerous tools are disabled" in detail:
+                return "DANGEROUS_TOOLS_DISABLED"
+            if "File tools are limited" in detail or "Symbolic links" in detail:
+                return "FILE_SCOPE_BLOCKED"
+            if "interpreters" in detail:
+                return "INTERPRETER_BLOCKED"
+            return "ACTION_BLOCKED"
+        if isinstance(exc, (FileNotFoundError, NotADirectoryError, IsADirectoryError)):
+            return "PATH_NOT_FOUND"
+        if isinstance(exc, TimeoutError):
+            return "ACTION_TIMEOUT"
+        if isinstance(exc, ValueError):
+            if "allow-listed" in detail:
+                return "TOOL_NOT_ALLOWED"
+            if "Invalid tool JSON" in detail or "unusable" in detail or "Malformed tool" in detail:
+                return "MODEL_OUTPUT_UNUSABLE"
+            return "ACTION_INVALID"
+        return "RUNTIME_ERROR"
 
     @staticmethod
     def _response(

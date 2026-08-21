@@ -64,13 +64,21 @@ class PermissionManager:
         self._pending[run_id] = pending
         return pending
 
+    def has_pending(self, run_id: str) -> bool:
+        """Report whether a run is still waiting for its owner to decide."""
+        self._expire()
+        return run_id in self._pending
+
     def decide(self, run_id: str, session_id: str, decision: str) -> ToolCall:
         self._expire()
-        pending = self._pending.pop(run_id, None)
+        pending = self._pending.get(run_id)
         if not pending:
             raise KeyError("No pending permission request for this run")
         if pending.session_id != session_id:
+            # An unauthorized attempt is an audit event, not a cancellation: the request stays
+            # pending so the owning session can still answer its own confirmation card.
             raise PermissionError("Permission decision belongs to a different session")
+        self._pending.pop(run_id, None)
         if decision == "deny":
             raise PermissionError("User denied permission")
         if decision == "allow_always" and pending.tool_call.permission != PermissionLevel.DANGEROUS:

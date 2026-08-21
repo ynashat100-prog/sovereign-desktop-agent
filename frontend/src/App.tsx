@@ -3,6 +3,7 @@ import { Bot, Globe2, Moon, Plus, Send, Settings, ShieldCheck, Sun, XOctagon } f
 import { SettingsPanel } from "./components/SettingsPanel";
 import { SetupWizard } from "./components/SetupWizard";
 import { TracePanel } from "./components/TracePanel";
+import { agentText } from "./agentMessages";
 import { translate } from "./i18n";
 import { useRuntime } from "./hooks/useRuntime";
 import type { AgentResponse, CustomProvider, Locale, PrivacyMode } from "./types/runtime";
@@ -47,7 +48,7 @@ export default function App() {
         privacyMode: privacyMode === "hybrid" ? "hybrid" : "local_only",
         cloudConsent: usingCloud,
       });
-      setConversation((items) => [...items, { role: "agent", text: response.message }]);
+      setConversation((items) => [...items, { role: "agent", text: agentText(response.message, t) }]);
       if (response.state === "awaiting_permission" && response.tool_calls.length > 0) setPendingApproval(response);
     } catch {
       setConversation((items) => [...items, { role: "agent", text: error || t("runtimeUnavailable") }]);
@@ -67,7 +68,7 @@ export default function App() {
     setBusy(true);
     try {
       const response = await decidePermission(pendingApproval.run_id, decision);
-      setConversation((items) => [...items, { role: "agent", text: response.message }]);
+      setConversation((items) => [...items, { role: "agent", text: agentText(response.message, t) }]);
     } catch {
       setConversation((items) => [...items, { role: "agent", text: decision === "deny" ? t("permissionDenied") : t("permissionFailed") }]);
     } finally {

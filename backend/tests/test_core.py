@@ -272,3 +272,82 @@ def test_stop_with_unknown_run_id_does_not_stop_other_runs():
 
     assert service.stop("unknown-run") == 0
     assert active.state == RunState.ROUTING
+
+
+def test_rejected_foreign_session_keeps_the_owner_request_pending():
+    manager = PermissionManager()
+    tool = ToolCall(
+        name="clipboard.write",
+        arguments={"text": "owned"},
+        permission=PermissionLevel.CONFIRM,
+        rationale="requested",
+    )
+    manager.request("run-1", "owner-session", tool)
+
+    try:
+        manager.decide("run-1", "attacker-session", "allow_once")
+    except PermissionError as exc:
+        assert "different session" in str(exc)
+    else:
+        raise AssertionError("A non-owning session must not decide another session's request")
+
+    assert manager.has_pending("run-1")
+    assert manager.decide("run-1", "owner-session", "allow_once") == tool
+
+
+def test_malformed_tool_line_is_repaired_for_non_dangerous_tools():
+    from app.services.agent import AgentService
+
+    service = object.__new__(AgentService)
+    service.permissions = PermissionManager()
+    tool = service._parse_tool(
+        "Here is the plan.\n```\nTOOL: filesystem.read_text | Documents/notes.txt | read notes\n```"
+    )
+    assert tool is not None
+    assert tool.name == "filesystem.read_text"
+    assert tool.arguments == {"path": "Documents/notes.txt"}
+
+
+def test_malformed_dangerous_tool_line_is_rejected_instead_of_guessed():
+    from app.services.agent import AgentService
+
+    service = object.__new__(AgentService)
+    service.permissions = PermissionManager()
+    try:
+        service._parse_tool("TOOL: filesystem.delete | /etc/hosts | cleanup")
+    except ValueError as exc:
+        assert "Malformed tool request" in str(exc)
+    else:
+        raise AssertionError("A malformed dangerous request must never be repaired")
+
+
+def test_tool_protocol_and_echoed_instructions_never_reach_the_user():
+    from app.services.agent import AgentService
+
+    message = AgentService._user_message(
+        "الملف يحتوي على الميزانية.\n"
+        "The permission engine—not you—decides whether an action runs. "
+        "For ordinary questions, respond normally and concisely.\n"
+        'TOOL: filesystem.read_text | {"path":"notes.txt"} | read'
+    )
+    assert "TOOL:" not in message
+    assert "permission engine" not in message
+    assert "الميزانية" in message
+
+    try:
+        AgentService._user_message('TOOL: filesystem.read_text | {"path":"notes.txt"} | read')
+    except ValueError as exc:
+        assert "unusable" in str(exc)
+    else:
+        raise AssertionError("A reply that is only protocol must not be shown to the user")
+
+
+def test_internal_failures_are_reported_as_stable_localizable_codes():
+    from app.services.agent import AgentService
+
+    assert AgentService._failure_code(PermissionError("Dangerous tools are disabled in Settings")) == "DANGEROUS_TOOLS_DISABLED"
+    assert AgentService._failure_code(PermissionError("File tools are limited to Desktop")) == "FILE_SCOPE_BLOCKED"
+    assert AgentService._failure_code(ValueError("Tool is not allow-listed: dir")) == "TOOL_NOT_ALLOWED"
+    assert AgentService._failure_code(ValueError("Invalid tool JSON: bad")) == "MODEL_OUTPUT_UNUSABLE"
+    assert AgentService._failure_code(FileNotFoundError("missing")) == "PATH_NOT_FOUND"
+    assert AgentService._failure_code(RuntimeError("boom")) == "RUNTIME_ERROR"
